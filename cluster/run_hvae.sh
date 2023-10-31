@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --mail-type=ALL # mail configuration: NONE, BEGIN, END, FAIL, REQUEUE, ALL
-#SBATCH --output=/itet-stor/yutono/net_scratch/diversity-based-active-learning/jobs/%j.out # where to store the output (%j is the JOBID), subdirectory "jobs" must exist
-#SBATCH --error=/itet-stor/yutono/net_scratch/diversity-based-active-learning/jobs/%j.err # where to store error messages
+#SBATCH --output=/itet-stor/yutono/net_scratch/hvae-oodd/jobs/%j.out # where to store the output (%j is the JOBID), subdirectory "jobs" must exist
+#SBATCH --error=/itet-stor/yutono/net_scratch/hvae-oodd/jobs/%j.err # where to store error messages
 #SBATCH --mem=64G
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
