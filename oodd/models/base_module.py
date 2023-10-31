@@ -60,12 +60,14 @@ class BaseModule(nn.Module):
         """Heuristically return the device which this model is on"""
         return next(self.parameters()).device
 
-    def save(self, path):
+    def save(self, path, rank):
         """Save the module class name, init_arguments and state_dict to different files in the directory given by path"""
-        os.makedirs(path, exist_ok=True)
-        torch.save(self.__class__.__name__, os.path.join(path, MODEL_CLASS_NAME_STR))
-        torch.save(self.init_arguments(), os.path.join(path, MODEL_INIT_KWRGS_STR))
-        torch.save(self.state_dict(), os.path.join(path, MODEL_STATE_DICT_STR))
+        print(f"Running DDP checkpoint on rank {rank}")
+        if rank == 0:
+            os.makedirs(path, exist_ok=True)
+            torch.save(self.__class__.__name__, os.path.join(path, MODEL_CLASS_NAME_STR))
+            torch.save(self.init_arguments(), os.path.join(path, MODEL_INIT_KWRGS_STR))
+            torch.save(self.state_dict(), os.path.join(path, MODEL_STATE_DICT_STR))
 
     @classmethod
     def load(cls, path, device: str = 'cpu'):

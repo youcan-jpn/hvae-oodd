@@ -15,10 +15,10 @@ Source code builds upon https://github.com/vlievin/biva-pytorch.
 
 ```
 conda deactivate
-conda env remove -n oodd -y
-conda create -y -n oodd python==3.8.10
-conda activate oodd
-conda install pytorch==1.12.1  torchvision torchaudio cudatoolkit=11.3 -c pytorch
+conda env remove -n my-oodd -y
+conda create -y -n my-oodd python==3.8.10
+conda activate my-oodd
+conda install pytorch==1.12.1 torchvision torchaudio cudatoolkit=11.3 -c pytorch
 pip install -r requirements.txt
 pip install --editable .
 ```

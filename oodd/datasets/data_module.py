@@ -7,7 +7,7 @@ from typing import List, Union, Dict, Any
 
 import torch
 
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, DistributedSampler
 
 import oodd.datasets
 
@@ -195,11 +195,13 @@ class DataModule:
         return self._wrap_dataloader(dataset, shuffle=False, batch_size=self.test_batch_size)
 
     def _wrap_dataloader(self, dataset, batch_size: int, shuffle: bool):
+        sampler = DistributedSampler(dataset)
         dataloader = DataLoader(
             dataset=dataset,
-            shuffle=shuffle,
+            shuffle=False,
             batch_size=batch_size,
             num_workers=self.data_workers,
+            sampler=sampler,
             pin_memory=False,  # This cannot be True with persistent_workers True (at least not with non Tensor outputs)
             persistent_workers=True,  # This avoids reinstantiating the datasets (which would re-seed)
         )

@@ -1,4 +1,5 @@
 import argparse
+import copy
 import datetime
 import logging
 import os
@@ -8,9 +9,14 @@ import numpy as np
 import rich
 import sklearn.metrics
 import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.optim as optim
+import torch.multiprocessing as mp
 import torch.utils.data
 
 from tqdm import tqdm
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 import oodd
 import oodd.models
@@ -60,10 +66,29 @@ args.test_sample_reduction = log_sum_exp if args.test_importance_weighted else t
 args.use_wandb = wandb_available and args.use_wandb
 
 set_seed(args.seed)
-device = get_device()
 
 
-def train(epoch):
+def ddp_setup(rank: int, world_size: int):
+    """
+    Parameters
+    ----------
+    rank : int
+        Unique identifier of each process
+    world_size : int
+        Total number of processes
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+
+def ddp_cleanup():
+    dist.destroy_process_group()
+
+
+def train(epoch, rank, model, deterministic_warmup, free_nats_cooldown, datamodule, criterion, optimizer):
     model.train()
     evaluator = Evaluator(primary_metric="log p(x)", logger=LOGGER, use_wandb=args.use_wandb)
 
@@ -72,7 +97,7 @@ def train(epoch):
 
     iterator = tqdm(enumerate(datamodule.train_loader), smoothing=0.9, total=len(datamodule.train_loader), leave=False)
     for _, (x, _) in iterator:
-        x = x.to(device)
+        x = x.to(rank)
 
         likelihood_data, stage_datas = model(x, n_posterior_samples=args.train_samples)
         kl_divergences = [
@@ -111,12 +136,12 @@ def train(epoch):
 
 
 @torch.no_grad()
-def test(epoch, dataloader, evaluator, dataset_name="test", max_test_examples=float("inf")):
+def test(epoch, rank, model, dataloader, evaluator, criterion, in_shape, dataset_name="test", max_test_examples=float("inf")):
     LOGGER.info(f"Testing: {dataset_name}")
     model.eval()
 
     x, _ = next(iter(dataloader))
-    x = x.to(device)
+    x = x.to(rank)
     n = min(x.size(0), 8)
     likelihood_data, stage_datas = model(x, n_posterior_samples=args.test_samples)
     p_x_mean = likelihood_data.mean[: args.batch_size].view(args.batch_size, *in_shape)  # Reshape zeroth "sample"
@@ -142,7 +167,7 @@ def test(epoch, dataloader, evaluator, dataset_name="test", max_test_examples=fl
             iterator = tqdm(enumerate(dataloader), smoothing=0.9, total=len(dataloader), leave=False)
 
         for _, (x, _) in iterator:
-            x = x.to(device)
+            x = x.to(rank)
 
             likelihood_data, stage_datas = model(
                 x, n_posterior_samples=args.test_samples, decode_from_p=decode_from_p, use_mode=decode_from_p
@@ -255,7 +280,10 @@ def subsample_labels_and_scores(y_true, y_score, n_examples):
     return y_true, y_score
 
 
-if __name__ == "__main__":
+def main(rank: int, world_size: int):
+    print(f"Running DDP on rank {rank}")
+    ddp_setup(rank, world_size)
+
     # Data
     datamodule = oodd.datasets.DataModule(
         batch_size=args.batch_size,
@@ -265,15 +293,21 @@ if __name__ == "__main__":
         val_datasets=args.val_datasets,
         test_datasets=args.test_datasets,
     )
-    args.save_dir = os.path.join(args.save_dir, list(datamodule.train_datasets.keys())[0] + "-" + args.start_time)
+    in_shape = datamodule.train_dataset.datasets[0].size[0]
+
+    args.save_dir = os.path.join(
+        args.save_dir,
+        list(datamodule.train_datasets.keys())[0] + "-" + args.start_time
+    )
+
+    if rank == 0:
+        datamodule.save(args.save_dir)
+
     os.makedirs(args.save_dir, exist_ok=True)
 
     fh = logging.FileHandler(os.path.join(args.save_dir, "dvae.log"))
     fh.setLevel(logging.INFO)
     LOGGER.addHandler(fh)
-
-    in_shape = datamodule.train_dataset.datasets[0].size[0]
-    datamodule.save(args.save_dir)
 
     # Model
     model = getattr(oodd.models.dvae, args.model)
@@ -281,10 +315,11 @@ if __name__ == "__main__":
     model_args, unknown_model_args = model_argparser.parse_known_args()
     model_args.input_shape = in_shape
 
-    model = model(**vars(model_args)).to(device)
+    model = model(**vars(model_args)).to(rank)
+    model = DDP(model, device_ids=[rank])
 
-    p_z_samples = model.prior.sample(torch.Size([args.n_eval_samples])).to(device)
-    sample_latents = [None] * (model.n_latents - 1) + [p_z_samples]
+    p_z_samples = model.module.prior.sample(torch.Size([args.n_eval_samples])).to(rank)
+    sample_latents = [None] * (model.module.n_latents - 1) + [p_z_samples]
 
     # Optimization
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -308,18 +343,26 @@ if __name__ == "__main__":
     LOGGER.info("DataModule:\n%s", datamodule)
     LOGGER.info("Model:\n%s", model)
 
-    if args.use_wandb:
-        wandb.init(project="hvae-oodd", config=args, name=f"{args.model} {datamodule.primary_val_name} {args.name}")
-        wandb.save("*.pt")
-        wandb.watch(model, log="all")
-
     # Run
     test_elbos = [-np.inf]
     test_evaluator = Evaluator(primary_source=datamodule.primary_val_name, primary_metric="log p(x)", logger=LOGGER, use_wandb=args.use_wandb)
 
     LOGGER.info("Running training...")
     for epoch in range(1, args.epochs + 1):
-        train(epoch)
+        # datamodule.train_loader.sampler.set_epoch(epoch)
+
+        train(
+            epoch=epoch,
+            rank=rank,
+            model=model,
+            deterministic_warmup=deterministic_warmup,
+            free_nats_cooldown=free_nats_cooldown,
+            datamodule=datamodule,
+            criterion=criterion,
+            optimizer=optimizer,
+        )
+
+        dist.barrier()
 
         if epoch % args.test_every == 0:
             # Sample
@@ -337,13 +380,20 @@ if __name__ == "__main__":
 
             # Test
             for name, dataloader in datamodule.val_loaders.items():
-                test(epoch, dataloader=dataloader, evaluator=test_evaluator, dataset_name=name, max_test_examples=10000)
+                test(
+                    epoch=epoch,
+                    dataloader=dataloader,
+                    evaluator=test_evaluator,
+                    in_shape=in_shape,
+                    dataset_name=name,
+                    max_test_examples=10000,
+                )
 
             # Save
             test_elbo = test_evaluator.get_primary_metric().mean().cpu().numpy()
-            if np.max(test_elbos) < test_elbo:
+            if rank == 0 and np.max(test_elbos) < test_elbo:
                 test_evaluator.save(args.save_dir)
-                model.save(args.save_dir)
+                model.save(args.save_dir, rank=rank)
                 LOGGER.info("Saved model!")
             test_elbos.append(test_elbo)
 
@@ -401,7 +451,20 @@ if __name__ == "__main__":
                         metrics={f"ROC AUC LLR>{n_skipped_latents} {ood_target}": [value_dict["roc_auc"]]},
                     )
 
+            dist.barrier()
+
             # Report
             test_evaluator.report(epoch * len(datamodule.train_loader))
             test_evaluator.log(epoch)
             test_evaluator.reset()
+    ddp_cleanup()
+
+
+def run_main(main_fn, world_size):
+    mp.spawn(main_fn, args=(world_size,), nprocs=world_size, join=True)
+
+
+if __name__ == "__main__":
+    world_size = torch.cuda.device_count()
+    print(f"world_size: {world_size}")
+    run_main(main_fn=main, world_size=world_size)
