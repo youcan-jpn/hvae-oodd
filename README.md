@@ -11,14 +11,14 @@ Source code builds upon https://github.com/vlievin/biva-pytorch.
 ![Reconstructions of FashionMNIST and MNIST examples by latent variable trained on FashionMNIST](https://github.com/JakobHavtorn/hvae-oodd/blob/main/assets/reconstructions.png)
 
 
-## Install
+## Install on the cluster
 
 ```
 conda deactivate
 conda env remove -n oodd -y
 conda create -y -n oodd python==3.8.10
 conda activate oodd
-conda install -y -c pytorch pytorch torchvision torchaudio cudatoolkit=11.3
+conda install pytorch==1.12.1  torchvision torchaudio cudatoolkit=11.3 -c pytorch
 pip install -r requirements.txt
 pip install --editable .
 ```
