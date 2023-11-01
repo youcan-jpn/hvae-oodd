@@ -2,12 +2,12 @@
 #SBATCH --mail-type=ALL # mail configuration: NONE, BEGIN, END, FAIL, REQUEUE, ALL
 #SBATCH --output=/itet-stor/yutono/net_scratch/hvae-oodd/jobs/%j.out # where to store the output (%j is the JOBID), subdirectory "jobs" must exist
 #SBATCH --error=/itet-stor/yutono/net_scratch/hvae-oodd/jobs/%j.err # where to store error messages
-#SBATCH --mem=64G
+#SBATCH --mem=80G
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:2
-#SBATCH --exclude=tikgpu10
-#SBATCH --nodelist=tikgpu05 # Specify that it should run on this particular node
+#SBATCH --gres=gpu:4
+#SBATCH --exclude=tikgpu[09-10]
+#SBATCH --nodelist=tikgpu07 # Specify that it should run on this particular node
 #CommentSBATCH --account=tik-internal
 #CommentSBATCH --constraint='titan_rtx|tesla_v100|titan_xp|a100_80gb'
 
@@ -53,7 +53,7 @@ cd ${DIRECTORY}
 # Execute your code
 python scripts/dvae_run.py \
 --epochs 2000 \
---batch_size 128 \
+--batch_size 32 \
 --free_nats 2 \
 --free_nats_epochs 400 \
 --warmup_epochs 200 \

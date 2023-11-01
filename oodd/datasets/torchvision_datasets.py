@@ -36,17 +36,17 @@ TRANSFORM_BINARIZE = torchvision.transforms.Compose(
 )
 
 
-def memoize(func):
-    cache = dict()
+# def memoize(func):
+#     cache = dict()
 
-    def memoized_func(*args):
-        if args in cache:
-            return cache[args]
-        result = func(*args)
-        cache[args] = result
-        return result
+#     def memoized_func(*args):
+#         if args in cache:
+#             return cache[args]
+#         result = func(*args)
+#         cache[args] = result
+#         return result
 
-    return memoized_func
+#     return memoized_func
 
 
 class TorchVisionDataset(BaseDataset):
@@ -69,10 +69,11 @@ class TorchVisionDataset(BaseDataset):
         self.root = root if not self.root_subdir else os.path.join(root, self.root_subdir)
         self.transform = self.default_transform if transform is None else transform
         self.target_transform = target_transform
-        self.dynamic = dynamic
-        if self.dynamic:
-            LOGGER.info("Running with caching")
-            self.item_getter = memoize(self.item_getter)
+        # self.dynamic = dynamic
+        # if self.dynamic:
+        #     LOGGER.info("Running with caching")
+        #     self.item_getter = memoize(self.item_getter)
+        self.dynamic = False
 
         self.dataset = self._data_source(
             **self._split_args[split],

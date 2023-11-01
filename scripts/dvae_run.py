@@ -95,7 +95,11 @@ def train(epoch, rank, model, deterministic_warmup, free_nats_cooldown, datamodu
     beta = next(deterministic_warmup)
     free_nats = next(free_nats_cooldown)
 
-    iterator = tqdm(enumerate(datamodule.train_loader), smoothing=0.9, total=len(datamodule.train_loader), leave=False)
+    if rank == 0:
+        iterator = tqdm(enumerate(datamodule.train_loader), smoothing=0.9, total=len(datamodule.train_loader), leave=False)
+    else:
+        iterator = enumerate(datamodule.train_loader)
+
     for _, (x, _) in iterator:
         x = x.to(rank)
 
@@ -128,6 +132,7 @@ def train(epoch, rank, model, deterministic_warmup, free_nats_cooldown, datamodu
         klds["KL(q(z|x), p(z))"] = kl_divergences
         evaluator.update("Train", "divergences", klds)
 
+    dist.barrier()
     evaluator.update(
         "Train", "hyperparameters", {"free_nats": [free_nats], "beta": [beta], "learning_rate": [args.learning_rate]}
     )
@@ -152,7 +157,7 @@ def test(epoch, rank, model, dataloader, evaluator, criterion, in_shape, dataset
     fig.savefig(os.path.join(args.save_dir, f"reconstructions_{dataset_name}_{epoch:03}"))
     plt.close()
 
-    decode_from_p_combinations = [[True] * n_p + [False] * (model.n_latents - n_p) for n_p in range(model.n_latents)]
+    decode_from_p_combinations = [[True] * n_p + [False] * (model.module.n_latents - n_p) for n_p in range(model.module.n_latents)]
     for decode_from_p in tqdm(decode_from_p_combinations, leave=False):
         n_skipped_latents = sum(decode_from_p)
 
@@ -187,6 +192,13 @@ def test(epoch, rank, model, dataloader, evaluator, criterion, in_shape, dataset
                 batch_reduction=None,
             )
 
+            # Federation
+            dist.all_reduce(loss, op=dist.ReduceOp.SUM)
+            dist.all_reduce(elbo, op=dist.ReduceOp.SUM)
+            dist.all_reduce(likelihood, op=dist.ReduceOp.SUM)
+            dist.all_reduce(kl_divergences, op=dist.ReduceOp.SUM)
+
+            dist.barrier()
             if n_skipped_latents == 0:  # Regular ELBO
                 evaluator.update(dataset_name, "elbo", {"log p(x)": elbo})
                 evaluator.update(
@@ -297,13 +309,13 @@ def main(rank: int, world_size: int):
 
     args.save_dir = os.path.join(
         args.save_dir,
-        list(datamodule.train_datasets.keys())[0] + "-" + args.start_time
+        list(datamodule.train_datasets.keys())[0] + "-" + "exp"
     )
+
+    os.makedirs(args.save_dir, exist_ok=True)
 
     if rank == 0:
         datamodule.save(args.save_dir)
-
-    os.makedirs(args.save_dir, exist_ok=True)
 
     fh = logging.FileHandler(os.path.join(args.save_dir, "dvae.log"))
     fh.setLevel(logging.INFO)
@@ -316,7 +328,7 @@ def main(rank: int, world_size: int):
     model_args.input_shape = in_shape
 
     model = model(**vars(model_args)).to(rank)
-    model = DDP(model, device_ids=[rank])
+    model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     p_z_samples = model.module.prior.sample(torch.Size([args.n_eval_samples])).to(rank)
     sample_latents = [None] * (model.module.n_latents - 1) + [p_z_samples]
@@ -367,7 +379,7 @@ def main(rank: int, world_size: int):
         if epoch % args.test_every == 0:
             # Sample
             with torch.no_grad():
-                likelihood_data, stage_datas = model.sample_from_prior(
+                likelihood_data, stage_datas = model.module.sample_from_prior(
                     n_prior_samples=args.n_eval_samples, forced_latent=sample_latents
                 )
                 p_x_samples = likelihood_data.samples.view(args.n_eval_samples, *in_shape)
@@ -382,8 +394,11 @@ def main(rank: int, world_size: int):
             for name, dataloader in datamodule.val_loaders.items():
                 test(
                     epoch=epoch,
+                    rank=rank,
+                    model=model,
                     dataloader=dataloader,
                     evaluator=test_evaluator,
+                    criterion=criterion,
                     in_shape=in_shape,
                     dataset_name=name,
                     max_test_examples=10000,
@@ -393,13 +408,13 @@ def main(rank: int, world_size: int):
             test_elbo = test_evaluator.get_primary_metric().mean().cpu().numpy()
             if rank == 0 and np.max(test_elbos) < test_elbo:
                 test_evaluator.save(args.save_dir)
-                model.save(args.save_dir, rank=rank)
+                model.module.save(args.save_dir, rank=rank)
                 LOGGER.info("Saved model!")
             test_elbos.append(test_elbo)
 
             # Compute LLR
             for source in test_evaluator.sources:
-                for k in range(1, model.n_latents):
+                for k in range(1, model.module.n_latents):
                     log_p_a = test_evaluator.metrics[source][f"skip-elbo"][f"0 log p(x)"]
                     log_p_b = test_evaluator.metrics[source][f"skip-elbo"][f"{k} log p(x)"]
                     llr = log_p_a - log_p_b
@@ -409,10 +424,10 @@ def main(rank: int, world_size: int):
             reference_dataset = datamodule.primary_val_name
             max_examples = min(
                 [len(d) for d in datamodule.val_datasets.values()]
-            )  # Maximum number of examples to use for equal sized sets
+            ) // world_size  # Maximum number of examples to use for equal sized sets
 
             # L >k
-            for n_skipped_latents in range(model.n_latents):
+            for n_skipped_latents in range(model.module.n_latents):
                 y_true, y_score, classes = test_evaluator.get_classes_and_scores_per_source(
                     f"skip-elbo", f"{n_skipped_latents} log p(x)"
                 )
@@ -433,9 +448,9 @@ def main(rank: int, world_size: int):
                     )
 
             # LLR >0 >k
-            for n_skipped_latents in range(1, model.n_latents):
+            for n_skipped_latents in range(1, model.module.n_latents):
                 y_true, y_score, classes = test_evaluator.get_classes_and_scores_per_source(
-                    f"LLR", f"LLR>{n_skipped_latents}"
+                    "LLR", f"LLR>{n_skipped_latents}"
                 )
                 y_true, y_score = subsample_labels_and_scores(y_true, y_score, max_examples)
                 roc, pr = compute_roc_pr_metrics(y_true, y_score, classes, classes[reference_dataset])
@@ -454,9 +469,10 @@ def main(rank: int, world_size: int):
             dist.barrier()
 
             # Report
-            test_evaluator.report(epoch * len(datamodule.train_loader))
-            test_evaluator.log(epoch)
-            test_evaluator.reset()
+            if rank == 0:
+                test_evaluator.report(epoch * len(datamodule.train_loader))
+                test_evaluator.log(epoch)
+                test_evaluator.reset()
     ddp_cleanup()
 
 
