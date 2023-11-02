@@ -21,7 +21,7 @@ LOGGER = logging.getLogger(name=__file__)
 TRANSFORM_DEQUANTIZE_8BIT = torchvision.transforms.Compose(
     [
         torchvision.transforms.ToTensor(),
-        transforms.Scale(a=0, b=255, min_val=0, max_val=1),  # Scale to [0, 1]
+        transforms.Scale(a=0, b=255, min_val=0, max_val=1),  # Scale to [0, 255]
         transforms.Dequantize(),  # Add U(0, 1) noise, becomes [0, 256]
         transforms.Scale(a=0, b=1, min_val=0, max_val=256),  # Scale to [0, 1]
     ]
