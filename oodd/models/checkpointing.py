@@ -33,6 +33,15 @@ class Checkpoint:
         self.load_datamodule()
         return self
 
+    def load_DDP(self, rank: int):
+        self.load_DDP_model(rank=rank)
+        self.load_datamodule()
+        return self
+
+    def load_DDP_model(self, rank: int):
+        self.model = oodd.models.load_DDP_model(self.path, rank=rank)
+        return self
+
     def load_model(self, device=oodd.utils.get_device()):
         self.model = oodd.models.load_model(self.path, device=device)
         return self

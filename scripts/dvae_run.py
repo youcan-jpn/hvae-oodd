@@ -3,6 +3,8 @@ import copy
 import datetime
 import logging
 import os
+from uuid import uuid4
+from collections import namedtuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -56,6 +58,9 @@ parser.add_argument("--test_every", type=int, default=1, help="epochs between ev
 parser.add_argument("--save_dir", type=str, default="./models", help="directory for saving models")
 parser.add_argument("--use_wandb", type=str2bool, default=True, help="use wandb tracking")
 parser.add_argument("--name", type=str, default=True, help="wandb tracking name")
+parser.add_argument("--checkpoint_path", type=str, default="", help="path to checkpoint")
+parser.add_argument("--exp_id", type=str, default="", help="unique id for the experiment")
+
 parser = oodd.datasets.DataModule.get_argparser(parents=[parser])
 
 args, unknown_args = parser.parse_known_args()
@@ -66,6 +71,19 @@ args.test_sample_reduction = log_sum_exp if args.test_importance_weighted else t
 args.use_wandb = wandb_available and args.use_wandb
 
 set_seed(args.seed)
+
+
+LoadingRet = namedtuple(
+    "LoadingRet",
+    [
+        "model",
+        "datamodule",
+        "optimizer",
+        "criterion",
+        "deterministic_warmup",
+        "free_nats_cooldown"
+    ]
+)
 
 
 def ddp_setup(rank: int, world_size: int):
@@ -86,6 +104,69 @@ def ddp_setup(rank: int, world_size: int):
 
 def ddp_cleanup():
     dist.destroy_process_group()
+
+
+def start_from_scratch(rank: int) -> LoadingRet:
+    # Data
+    datamodule = oodd.datasets.DataModule(
+        batch_size=args.batch_size,
+        test_batch_size=250,
+        data_workers=args.data_workers,
+        train_datasets=args.train_datasets,
+        val_datasets=args.val_datasets,
+        test_datasets=args.test_datasets,
+    )
+    in_shape = datamodule.train_dataset.datasets[0].size[0]
+
+    args.save_dir = os.path.join(
+        args.save_dir,
+        list(datamodule.train_datasets.keys())[0] + "-" + args.exp_id
+    )
+
+    os.makedirs(args.save_dir, exist_ok=True)
+
+    if rank == 0:
+        datamodule.save(args.save_dir)
+
+    fh = logging.FileHandler(os.path.join(args.save_dir, "dvae.log"))
+    fh.setLevel(logging.INFO)
+    LOGGER.addHandler(fh)
+
+    # Model
+    model = getattr(oodd.models.dvae, args.model)
+    model_argparser = model.get_argparser()
+    model_args, unknown_model_args = model_argparser.parse_known_args()
+    model_args.input_shape = in_shape
+    model = model(**vars(model_args)).to(rank)
+    model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+
+    # Optimization
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+
+    criterion = oodd.losses.ELBO()
+
+    deterministic_warmup = oodd.variational.DeterministicWarmup(
+        n=args.warmup_epochs
+    )
+    free_nats_cooldown = oodd.variational.FreeNatsCooldown(
+        constant_epochs=args.free_nats_epochs // 2,
+        cooldown_epochs=args.free_nats_epochs // 2,
+        start_val=args.free_nats,
+        end_val=0,
+    )
+
+    return LoadingRet(
+        model=model,
+        datamodule=datamodule,
+        criterion=criterion,
+        optimizer=optimizer,
+        deterministic_warmup=deterministic_warmup,
+        free_nats_cooldown=free_nats_cooldown
+    )
+
+
+def start_from_checkpoint() -> LoadingRet:
+    raise NotImplementedError
 
 
 def train(epoch, rank, model, deterministic_warmup, free_nats_cooldown, datamodule, criterion, optimizer):
@@ -285,59 +366,25 @@ def subsample_labels_and_scores(y_true, y_score, n_examples):
     return y_true, y_score
 
 
-def main(rank: int, world_size: int):
+def main(rank: int, world_size: int, exp_id: str):
     print(f"Running DDP on rank {rank}")
     ddp_setup(rank, world_size)
+    if args.exp_id == "":
+        args.exp_id = exp_id
+    if args.checkpoint_path == "":
+        settings = start_from_scratch(rank=rank)
+    else:
+        settings = start_from_checkpoint()
+    model = settings.model
+    datamodule = settings.datamodule
+    deterministic_warmup = settings.deterministic_warmup
+    free_nats_cooldown = settings.free_nats_cooldown
+    criterion = settings.criterion
+    optimizer = settings.optimizer
 
-    # Data
-    datamodule = oodd.datasets.DataModule(
-        batch_size=args.batch_size,
-        test_batch_size=250,
-        data_workers=args.data_workers,
-        train_datasets=args.train_datasets,
-        val_datasets=args.val_datasets,
-        test_datasets=args.test_datasets,
-    )
     in_shape = datamodule.train_dataset.datasets[0].size[0]
-
-    args.save_dir = os.path.join(
-        args.save_dir,
-        list(datamodule.train_datasets.keys())[0] + "-" + "exp"
-    )
-
-    os.makedirs(args.save_dir, exist_ok=True)
-
-    if rank == 0:
-        datamodule.save(args.save_dir)
-
-    fh = logging.FileHandler(os.path.join(args.save_dir, "dvae.log"))
-    fh.setLevel(logging.INFO)
-    LOGGER.addHandler(fh)
-
-    # Model
-    model = getattr(oodd.models.dvae, args.model)
-    model_argparser = model.get_argparser()
-    model_args, unknown_model_args = model_argparser.parse_known_args()
-    model_args.input_shape = in_shape
-
-    model = model(**vars(model_args)).to(rank)
-    model = DDP(model, device_ids=[rank], find_unused_parameters=True)
-
     p_z_samples = model.module.prior.sample(torch.Size([args.n_eval_samples])).to(rank)
     sample_latents = [None] * (model.module.n_latents - 1) + [p_z_samples]
-
-    # Optimization
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-
-    criterion = oodd.losses.ELBO()
-
-    deterministic_warmup = oodd.variational.DeterministicWarmup(n=args.warmup_epochs)
-    free_nats_cooldown = oodd.variational.FreeNatsCooldown(
-        constant_epochs=args.free_nats_epochs // 2,
-        cooldown_epochs=args.free_nats_epochs // 2,
-        start_val=args.free_nats,
-        end_val=0,
-    )
 
     # Logging
     LOGGER.info("Experiment config:")
@@ -466,11 +513,12 @@ def main(rank: int, world_size: int):
     ddp_cleanup()
 
 
-def run_main(main_fn, world_size):
-    mp.spawn(main_fn, args=(world_size,), nprocs=world_size, join=True)
+def run_main(main_fn, world_size: int, exp_id: str):
+    mp.spawn(main_fn, args=(world_size, exp_id), nprocs=world_size, join=True)
 
 
 if __name__ == "__main__":
     world_size = torch.cuda.device_count()
     print(f"world_size: {world_size}")
-    run_main(main_fn=main, world_size=world_size)
+    default_exp_id = uuid4().hex
+    run_main(main_fn=main, world_size=world_size, exp_id=default_exp_id)

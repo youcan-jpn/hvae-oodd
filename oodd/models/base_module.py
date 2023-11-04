@@ -1,9 +1,11 @@
 import inspect
 import logging
 import os
+from typing import Optional
 
 import torch
 import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel
 
 import oodd.models
 
@@ -24,7 +26,19 @@ def load_model(path, model_class_name: str = None, device: str = 'cpu'):
             raise RuntimeError(f'Name of class of model to load not specified and not saved in checkpoint: {path}')
 
     model_class = getattr(oodd.models, model_class_name)
-    model = model_class.load(path, device=device)
+    model = model_class.load(path, device=device, distibuted=False)
+    return model
+
+
+def load_DDP_model(path, rank: int, model_class_name: str = None):
+    if model_class_name is None:
+        if os.path.exists(os.path.join(path, MODEL_CLASS_NAME_STR)):
+            model_class_name = torch.load(os.path.join(path, MODEL_CLASS_NAME_STR))
+            LOGGER.debug(f"Loading DDP '{model_class_name}' from 'oodd.models'")
+        else:
+            raise RuntimeError(f'Name of class of model to load not specified and not saved in checkpoint: {path}')
+    model_class = getattr(oodd.models, model_class_name)
+    model = model_class.load(path, rank=rank, distributed=True)
     return model
 
 
@@ -70,16 +84,33 @@ class BaseModule(nn.Module):
             torch.save(self.state_dict(), os.path.join(path, MODEL_STATE_DICT_STR))
 
     @classmethod
-    def load(cls, path, device: str = 'cpu'):
+    def load(
+        cls,
+        path,
+        device: Optional[str],
+        rank: Optional[int],
+        distributed: bool
+    ):
         """Return an instance of the concrete module instantiated using saved init_arguments and with state_dict loaded"""
         model_kwargs = torch.load(os.path.join(path, MODEL_INIT_KWRGS_STR))
         kwargs = model_kwargs.pop('kwargs', {})
         args = model_kwargs.pop('args', [])
 
         model = cls(*args, **kwargs, **model_kwargs)
-        model.to(device)
-
-        state_dict = torch.load(os.path.join(path, MODEL_STATE_DICT_STR), map_location=device)
+        if distributed:
+            model.to(rank)
+            model = DistributedDataParallel(model, device_ids=[rank])
+            map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+            state_dict = torch.load(
+                os.path.join(path, MODEL_STATE_DICT_STR),
+                map_location=map_location
+            )
+        else:
+            model.to(device)
+            state_dict = torch.load(
+                os.path.join(path, MODEL_STATE_DICT_STR),
+                map_location=device
+            )
         model.load_state_dict(state_dict)
         return model
 
