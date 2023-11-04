@@ -134,7 +134,7 @@ class DataModule:
 
         # Concatenate the (potentially) multiple training datasets into one
         self.train_dataset = ConcatDataset(self.train_datasets.values()) if self.train_datasets else None
-        
+
         self.recreate_dataloaders()
 
     def _update_config(self, dataset_group, dataset_name, kwargs):
@@ -189,13 +189,20 @@ class DataModule:
         self.train_loader = self._wrap_train_loader(self.train_dataset) if self.train_datasets else None
 
     def _wrap_train_loader(self, dataset):
-        return self._wrap_dataloader(dataset, shuffle=True, batch_size=self.batch_size)
+        return self._wrap_dataloader(
+            dataset=dataset,
+            batch_size=self.batch_size,
+            sampler=DistributedSampler(dataset, drop_last=True)
+        )
 
     def _wrap_test_loader(self, dataset):
-        return self._wrap_dataloader(dataset, shuffle=False, batch_size=self.test_batch_size)
+        return self._wrap_dataloader(
+            dataset=dataset,
+            batch_size=self.test_batch_size,
+            sampler=None
+        )
 
-    def _wrap_dataloader(self, dataset, batch_size: int, shuffle: bool):
-        sampler = DistributedSampler(dataset)
+    def _wrap_dataloader(self, dataset, batch_size: int, sampler):
         dataloader = DataLoader(
             dataset=dataset,
             shuffle=False,

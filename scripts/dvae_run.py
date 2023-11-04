@@ -192,13 +192,6 @@ def test(epoch, rank, model, dataloader, evaluator, criterion, in_shape, dataset
                 batch_reduction=None,
             )
 
-            # Federation
-            dist.all_reduce(loss, op=dist.ReduceOp.SUM)
-            dist.all_reduce(elbo, op=dist.ReduceOp.SUM)
-            dist.all_reduce(likelihood, op=dist.ReduceOp.SUM)
-            dist.all_reduce(kl_divergences, op=dist.ReduceOp.SUM)
-
-            dist.barrier()
             if n_skipped_latents == 0:  # Regular ELBO
                 evaluator.update(dataset_name, "elbo", {"log p(x)": elbo})
                 evaluator.update(
@@ -361,7 +354,7 @@ def main(rank: int, world_size: int):
 
     LOGGER.info("Running training...")
     for epoch in range(1, args.epochs + 1):
-        # datamodule.train_loader.sampler.set_epoch(epoch)
+        datamodule.train_loader.sampler.set_epoch(epoch)
 
         train(
             epoch=epoch,
@@ -376,7 +369,7 @@ def main(rank: int, world_size: int):
 
         dist.barrier()
 
-        if epoch % args.test_every == 0:
+        if epoch % args.test_every == 0 and rank == 0:
             # Sample
             with torch.no_grad():
                 likelihood_data, stage_datas = model.module.sample_from_prior(
@@ -406,7 +399,7 @@ def main(rank: int, world_size: int):
 
             # Save
             test_elbo = test_evaluator.get_primary_metric().mean().cpu().numpy()
-            if rank == 0 and np.max(test_elbos) < test_elbo:
+            if np.max(test_elbos) < test_elbo:
                 test_evaluator.save(args.save_dir)
                 model.module.save(args.save_dir, rank=rank)
                 LOGGER.info("Saved model!")
@@ -466,13 +459,10 @@ def main(rank: int, world_size: int):
                         metrics={f"ROC AUC LLR>{n_skipped_latents} {ood_target}": [value_dict["roc_auc"]]},
                     )
 
-            dist.barrier()
-
             # Report
-            if rank == 0:
-                test_evaluator.report(epoch * len(datamodule.train_loader))
-                test_evaluator.log(epoch)
-                test_evaluator.reset()
+            test_evaluator.report(epoch * len(datamodule.train_loader))
+            test_evaluator.log(epoch)
+            test_evaluator.reset()
     ddp_cleanup()
 
 
