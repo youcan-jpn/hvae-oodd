@@ -5,14 +5,14 @@ class DeterministicWarmup:
     If n == 0, the warmup is complete from the very first epoch, i.e. t=t_max (i.e. no warmup).
     """
 
-    def __init__(self, n=200, t_max=1, t_start=0):
+    def __init__(self, n=200, t_max=1, t_start=0, start_epoch=0):
         if n < 0:
             raise ValueError("Cannot use fewer than zero iterations to warm up")
         self.n = n
         self.t_max = t_max
         self.t_start = t_start
-        self.t = t_start if n != 0 else t_max  # If warming up over n=0 iterations, start at t_max, i.e. done.
-        self.inc = 1 / n if n != 0 else 0  # If warmning up over n=0 iterations, incrememts are zero for completeness.
+        self.inc = (t_max - t_start) / n if n != 0 else 0  # If warmning up over n=0 iterations, incrememts are zero for completeness.
+        self.t = t_start + self.inc * start_epoch if n != 0 else t_max  # If warming up over n=0 iterations, start at t_max, i.e. done.
 
     @property
     def is_done(self):

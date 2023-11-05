@@ -49,7 +49,7 @@ class FreeNats:
 class FreeNatsCooldown:
     """Linear deterministic schedule for FreeNats."""
 
-    def __init__(self, constant_epochs=200, cooldown_epochs=200, start_val=0.2, end_val=0):
+    def __init__(self, constant_epochs=200, cooldown_epochs=200, start_val=0.2, end_val=0, start_epoch=-1):
         self.constant_epochs = constant_epochs
         self.cooldown_epochs = cooldown_epochs
         self.start_val = start_val
@@ -60,7 +60,7 @@ class FreeNatsCooldown:
                 np.linspace(start_val, end_val, cooldown_epochs),  # [start_val, ..., end_val]
             ]
         )
-        self.i_epoch = -1
+        self.i_epoch = start_epoch - 1
 
     @property
     def is_done(self):
