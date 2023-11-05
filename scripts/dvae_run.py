@@ -3,6 +3,7 @@ import copy
 import datetime
 import logging
 import os
+import random
 from uuid import uuid4
 from collections import namedtuple
 
@@ -76,12 +77,10 @@ set_seed(args.seed)
 LoadingRet = namedtuple(
     "LoadingRet",
     [
+        "epoch",
         "model",
         "datamodule",
         "optimizer",
-        "criterion",
-        "deterministic_warmup",
-        "free_nats_cooldown"
     ]
 )
 
@@ -106,7 +105,24 @@ def ddp_cleanup():
     dist.destroy_process_group()
 
 
+def save_checkpoint(save_dir, *, epoch, optimizer):
+    OTHERS_CHECKPOINT_NAME = "others.pt"
+    cp = {
+        "epoch": epoch,
+        "optimizer": optimizer.state_dict(),
+        "random": random.getstate(),
+        "np_random": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "torch_random": torch.random.get_rng_state(),
+        "cuda_random": torch.cuda.get_rng_state(),
+        "cuda_random_all": torch.cuda.get_rng_state_all(),
+    }
+    save_path = os.path.join(save_dir, OTHERS_CHECKPOINT_NAME)
+    torch.save(cp, save_path)
+
+
 def start_from_scratch(rank: int) -> LoadingRet:
+    print("starting from scratch ...")
     # Data
     datamodule = oodd.datasets.DataModule(
         batch_size=args.batch_size,
@@ -143,30 +159,50 @@ def start_from_scratch(rank: int) -> LoadingRet:
     # Optimization
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
-    criterion = oodd.losses.ELBO()
+    return LoadingRet(
+        model=model,
+        epoch=0,
+        datamodule=datamodule,
+        optimizer=optimizer,
+    )
 
-    deterministic_warmup = oodd.variational.DeterministicWarmup(
-        n=args.warmup_epochs
+
+def start_from_checkpoint(rank: int) -> LoadingRet:
+    print("starting from checkpoint ...")
+    checkpoint = oodd.models.Checkpoint(path=args.checkpoint_path)
+    others_path = os.path.join(args.checkpoint_path, "others.pt")
+    checkpoint.load_DDP(rank=rank, others_path=others_path)
+    model = checkpoint.model
+    datamodule = checkpoint.datamodule
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+    optimizer.load_state_dict(checkpoint.others["optimizer"])
+    epoch = checkpoint.others["epoch"]  # TODO
+
+    args.exp_id = _get_exp_name_from_checkpoint_dir(args.checkpoint_path)
+    args.save_dir = os.path.join(
+        args.save_dir,
+        list(datamodule.train_datasets.keys())[0] + "-" + args.exp_id
     )
-    free_nats_cooldown = oodd.variational.FreeNatsCooldown(
-        constant_epochs=args.free_nats_epochs // 2,
-        cooldown_epochs=args.free_nats_epochs // 2,
-        start_val=args.free_nats,
-        end_val=0,
-    )
+    print(f"{args.save_dir=}")
+
+    fh = logging.FileHandler(os.path.join(args.save_dir, "dvae.log"))
+    fh.setLevel(logging.INFO)
+    LOGGER.addHandler(fh)
 
     return LoadingRet(
         model=model,
+        epoch=epoch,
         datamodule=datamodule,
-        criterion=criterion,
         optimizer=optimizer,
-        deterministic_warmup=deterministic_warmup,
-        free_nats_cooldown=free_nats_cooldown
     )
 
 
-def start_from_checkpoint() -> LoadingRet:
-    raise NotImplementedError
+def _get_exp_name_from_checkpoint_dir(checkpoint_dir: str):
+    separated = checkpoint_dir.split("-")
+    if len(separated) == 2:
+        return separated[1]
+    else:
+        raise ValueError("Unknown type of checkpoint folder name")
 
 
 def train(epoch, rank, model, deterministic_warmup, free_nats_cooldown, datamodule, criterion, optimizer):
@@ -371,16 +407,29 @@ def main(rank: int, world_size: int, exp_id: str):
     ddp_setup(rank, world_size)
     if args.exp_id == "":
         args.exp_id = exp_id
+
     if args.checkpoint_path == "":
         settings = start_from_scratch(rank=rank)
     else:
-        settings = start_from_checkpoint()
+        settings = start_from_checkpoint(rank=rank)
     model = settings.model
     datamodule = settings.datamodule
-    deterministic_warmup = settings.deterministic_warmup
-    free_nats_cooldown = settings.free_nats_cooldown
-    criterion = settings.criterion
     optimizer = settings.optimizer
+    current_epoch = settings.epoch
+
+    deterministic_warmup = oodd.variational.DeterministicWarmup(
+        n=args.warmup_epochs,
+        start_epoch=current_epoch,
+    )
+    free_nats_cooldown = oodd.variational.FreeNatsCooldown(
+        constant_epochs=args.free_nats_epochs // 2,
+        cooldown_epochs=args.free_nats_epochs // 2,
+        start_val=args.free_nats,
+        end_val=0,
+        start_epoch=current_epoch,
+    )
+
+    criterion = oodd.losses.ELBO()
 
     in_shape = datamodule.train_dataset.datasets[0].size[0]
     p_z_samples = model.module.prior.sample(torch.Size([args.n_eval_samples])).to(rank)
@@ -400,7 +449,7 @@ def main(rank: int, world_size: int, exp_id: str):
     test_evaluator = Evaluator(primary_source=datamodule.primary_val_name, primary_metric="log p(x)", logger=LOGGER, use_wandb=args.use_wandb)
 
     LOGGER.info("Running training...")
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(current_epoch + 1, args.epochs + 1):
         datamodule.train_loader.sampler.set_epoch(epoch)
 
         train(
@@ -449,6 +498,10 @@ def main(rank: int, world_size: int, exp_id: str):
             if np.max(test_elbos) < test_elbo:
                 test_evaluator.save(args.save_dir)
                 model.module.save(args.save_dir, rank=rank)
+                torch.save(model.state_dict(), os.path.join(args.save_dir, "ddp_model_state_dict.pt"))
+                save_checkpoint(
+                    args.save_dir, epoch=epoch, optimizer=optimizer
+                )
                 LOGGER.info("Saved model!")
             test_elbos.append(test_elbo)
 

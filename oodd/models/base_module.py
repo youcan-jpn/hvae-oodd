@@ -26,7 +26,7 @@ def load_model(path, model_class_name: str = None, device: str = 'cpu'):
             raise RuntimeError(f'Name of class of model to load not specified and not saved in checkpoint: {path}')
 
     model_class = getattr(oodd.models, model_class_name)
-    model = model_class.load(path, device=device, distibuted=False)
+    model = model_class.load(path, device=device, rank=None, distibuted=False)
     return model
 
 
@@ -38,7 +38,7 @@ def load_DDP_model(path, rank: int, model_class_name: str = None):
         else:
             raise RuntimeError(f'Name of class of model to load not specified and not saved in checkpoint: {path}')
     model_class = getattr(oodd.models, model_class_name)
-    model = model_class.load(path, rank=rank, distributed=True)
+    model = model_class.load(path, device=None, rank=rank, distributed=True)
     return model
 
 
@@ -99,19 +99,20 @@ class BaseModule(nn.Module):
         model = cls(*args, **kwargs, **model_kwargs)
         if distributed:
             model.to(rank)
-            model = DistributedDataParallel(model, device_ids=[rank])
+            model = DistributedDataParallel(model, device_ids=[rank], find_unused_parameters=True)
             map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
             state_dict = torch.load(
                 os.path.join(path, MODEL_STATE_DICT_STR),
                 map_location=map_location
             )
+            model.module.load_state_dict(state_dict)
         else:
             model.to(device)
             state_dict = torch.load(
                 os.path.join(path, MODEL_STATE_DICT_STR),
                 map_location=device
             )
-        model.load_state_dict(state_dict)
+            model.load_state_dict(state_dict)
         return model
 
     def extra_repr(self):

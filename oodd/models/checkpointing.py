@@ -27,15 +27,26 @@ class Checkpoint:
     model: BaseModule = None
     optimizer: torch.optim.Optimizer = None
     datamodule: DataModule = None
+    # others: dict = {
+    #     "epoch": 0,
+    #     "optimizer": dict(),
+    #     "random": tuple(),
+    #     "np_random": dict(),
+    #     "torch": None,  # Tensor
+    #     "torch_random": None,  # Tensor
+    #     "cuda_random": None,  # Tensor
+    #     "cuda_random_all": None,  # Tensor
+    # }
 
     def load(self, device=oodd.utils.get_device()):
         self.load_model(device=device)
         self.load_datamodule()
         return self
 
-    def load_DDP(self, rank: int):
+    def load_DDP(self, rank: int, others_path: str):
         self.load_DDP_model(rank=rank)
         self.load_datamodule()
+        self.load_others(others_path)
         return self
 
     def load_DDP_model(self, rank: int):
@@ -49,6 +60,11 @@ class Checkpoint:
     def load_datamodule(self, **override_kwargs):
         LOGGER.info('Loading DataModule' + f' with overridding kwargs {override_kwargs}' if override_kwargs else '')
         self.datamodule = DataModule.load(self.path, **override_kwargs)
+        return self
+
+    def load_others(self, path):
+        LOGGER.info("Loading other info")
+        self.others = torch.load(path)
         return self
 
 
