@@ -40,7 +40,7 @@ class Checkpoint:
 
     def load(self, device=oodd.utils.get_device()):
         self.load_model(device=device)
-        self.load_datamodule()
+        # self.load_datamodule()
         return self
 
     def load_DDP(self, rank: int, others_path: str):

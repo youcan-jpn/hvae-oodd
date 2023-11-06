@@ -55,6 +55,7 @@ class DataModule:
         batch_size: int = default_batch_size,
         test_batch_size: int = None,
         data_workers: int = default_data_workers,
+        distributed: bool = True,
     ):
         """A DataModule that serves several datasets for training, validation and testing.
 
@@ -100,7 +101,7 @@ class DataModule:
         self.test_datasets = {}
 
         # Build datasets and loaders
-        self.add_datasets(train_datasets, val_datasets, test_datasets)
+        self.add_datasets(train_datasets, val_datasets, test_datasets, distributed=distributed)
 
         # Define primary validation dataset
         self.primary_val_name = list(val_datasets.keys())[0]
@@ -112,6 +113,7 @@ class DataModule:
         train_datasets: Dict[str, Dict[str, Any]] = {},
         val_datasets: Dict[str, Dict[str, Any]] = {},
         test_datasets: Dict[str, Dict[str, Any]] = {},
+        distributed: bool = True,
     ):
         """Build datasets for training, validation and test datasets"""
         for name, kwargs in train_datasets.items():
@@ -135,7 +137,7 @@ class DataModule:
         # Concatenate the (potentially) multiple training datasets into one
         self.train_dataset = ConcatDataset(self.train_datasets.values()) if self.train_datasets else None
 
-        self.recreate_dataloaders()
+        self.recreate_dataloaders(distributed=distributed)
 
     def _update_config(self, dataset_group, dataset_name, kwargs):
         if dataset_name in self.config[dataset_group]:
@@ -182,17 +184,17 @@ class DataModule:
         LOGGER.info("Created dataset %s", dataset)
         return dataset, args
 
-    def recreate_dataloaders(self):
-        self.train_loaders = {name: self._wrap_train_loader(dset) for name, dset in self.train_datasets.items()}
+    def recreate_dataloaders(self, distributed):
+        self.train_loaders = {name: self._wrap_train_loader(dset, distributed) for name, dset in self.train_datasets.items()}
         self.val_loaders = {name: self._wrap_test_loader(dset) for name, dset in self.val_datasets.items()}
         self.test_loaders = {name: self._wrap_test_loader(dset) for name, dset in self.test_datasets.items()}
-        self.train_loader = self._wrap_train_loader(self.train_dataset) if self.train_datasets else None
+        self.train_loader = self._wrap_train_loader(self.train_dataset, distributed) if self.train_datasets else None
 
-    def _wrap_train_loader(self, dataset):
+    def _wrap_train_loader(self, dataset, distributed: bool):
         return self._wrap_dataloader(
             dataset=dataset,
             batch_size=self.batch_size,
-            sampler=DistributedSampler(dataset, drop_last=True)
+            sampler=DistributedSampler(dataset, drop_last=True) if distributed else None
         )
 
     def _wrap_test_loader(self, dataset):
@@ -256,7 +258,7 @@ class DataModule:
     @data_workers.setter
     def data_workers(self, data_workers):
         self._data_workers = data_workers
-        self.recreate_dataloaders()
+        self.recreate_dataloaders(distributed=True)  # TODO
 
     @property
     def size(self):
