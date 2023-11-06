@@ -26,7 +26,7 @@ def load_model(path, model_class_name: str = None, device: str = 'cpu'):
             raise RuntimeError(f'Name of class of model to load not specified and not saved in checkpoint: {path}')
 
     model_class = getattr(oodd.models, model_class_name)
-    model = model_class.load(path, device=device, rank=None, distibuted=False)
+    model = model_class.load(path, device=device, rank=None, distributed=False)
     return model
 
 
