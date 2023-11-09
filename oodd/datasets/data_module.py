@@ -235,9 +235,17 @@ class DataModule:
     @batch_size.setter
     def batch_size(self, batch_size):
         """Setting batch_size also updates the training set data loaders"""
-        self._batch_size = batch_size
-        self.train_loaders = {name: self._wrap_train_loader(dset) for name, dset in self.train_datasets.items()}
-        self.train_loader = self._wrap_train_loader(self.train_dataset)
+        if isinstance(batch_size, int):
+            self._batch_size = batch_size
+            self.train_loaders = {name: self._wrap_train_loader(dset) for name, dset in self.train_datasets.items()}
+            self.train_loader = self._wrap_train_loader(self.train_dataset)
+        elif len(batch_size) == 2:
+            bs, dist = batch_size
+            self._batch_size = bs
+            self.train_loaders = {name: self._wrap_train_loader(dset, dist) for name, dset in self.train_datasets.items()}
+            self.train_loader = self._wrap_train_loader(self.train_dataset, dist)
+        else:
+            raise ValueError(f"Unknown type of batch_size: {type(batch_size)}")
 
     @property
     def test_batch_size(self):
@@ -257,8 +265,14 @@ class DataModule:
 
     @data_workers.setter
     def data_workers(self, data_workers):
-        self._data_workers = data_workers
-        self.recreate_dataloaders(distributed=True)  # TODO
+        if isinstance(data_workers, int):
+            print("int")
+            self._data_workers = data_workers
+            self.recreate_dataloaders(distributed=True)  # TODO
+        elif len(data_workers) == 2:
+            dw, distributed = data_workers
+            self._data_workers = dw
+            self.recreate_dataloaders(distributed=distributed)
 
     @property
     def size(self):
