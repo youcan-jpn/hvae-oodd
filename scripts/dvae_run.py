@@ -121,6 +121,22 @@ def save_checkpoint(save_dir, *, epoch, optimizer):
     torch.save(cp, save_path)
 
 
+def save_checkpoint_with_epoch(save_dir, *, epoch, optimizer):
+    OTHERS_CHECKPOINT_NAME = f"others_{epoch}.pt"
+    cp = {
+        "epoch": epoch,
+        "optimizer": optimizer.state_dict(),
+        "random": random.getstate(),
+        "np_random": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+        "torch_random": torch.random.get_rng_state(),
+        "cuda_random": torch.cuda.get_rng_state(),
+        "cuda_random_all": torch.cuda.get_rng_state_all(),
+    }
+    save_path = os.path.join(save_dir, OTHERS_CHECKPOINT_NAME)
+    torch.save(cp, save_path)
+
+
 def start_from_scratch(rank: int) -> LoadingRet:
     print("starting from scratch ...")
     # Data
@@ -415,7 +431,7 @@ def main(rank: int, world_size: int, exp_id: str):
     model = settings.model
     datamodule = settings.datamodule
     optimizer = settings.optimizer
-    current_epoch = settings.epoch
+    start_epoch = settings.epoch
 
     deterministic_warmup = oodd.variational.DeterministicWarmup(
         n=args.warmup_epochs,
@@ -449,11 +465,11 @@ def main(rank: int, world_size: int, exp_id: str):
     test_evaluator = Evaluator(primary_source=datamodule.primary_val_name, primary_metric="log p(x)", logger=LOGGER, use_wandb=args.use_wandb)
 
     LOGGER.info("Running training...")
-    for epoch in range(current_epoch + 1, args.epochs + 1):
-        datamodule.train_loader.sampler.set_epoch(epoch)
+    for current_epoch in range(start_epoch + 1, args.epochs + 1):
+        datamodule.train_loader.sampler.set_epoch(current_epoch)
 
         train(
-            epoch=epoch,
+            epoch=current_epoch,
             rank=rank,
             model=model,
             deterministic_warmup=deterministic_warmup,
@@ -465,7 +481,7 @@ def main(rank: int, world_size: int, exp_id: str):
 
         dist.barrier()
 
-        if epoch % args.test_every == 0 and rank == 0:
+        if current_epoch % args.test_every == 0 and rank == 0:
             # Sample
             with torch.no_grad():
                 likelihood_data, stage_datas = model.module.sample_from_prior(
@@ -476,13 +492,13 @@ def main(rank: int, world_size: int, exp_id: str):
                 comparison = torch.cat([p_x_samples, p_x_mean])
                 comparison = comparison.permute(0, 2, 3, 1)  # [B, H, W, C]
                 fig, ax = plot_gallery(comparison.cpu().numpy(), ncols=args.n_eval_samples // 4)
-                fig.savefig(os.path.join(args.save_dir, f"samples_{epoch:03}"))
+                fig.savefig(os.path.join(args.save_dir, f"samples_{current_epoch:03}"))
                 plt.close()
 
             # Test
             for name, dataloader in datamodule.val_loaders.items():
                 test(
-                    epoch=epoch,
+                    epoch=current_epoch,
                     rank=rank,
                     model=model,
                     dataloader=dataloader,
@@ -495,12 +511,18 @@ def main(rank: int, world_size: int, exp_id: str):
 
             # Save
             test_elbo = test_evaluator.get_primary_metric().mean().cpu().numpy()
+            if current_epoch % 50 == 0:
+                model.module.save(args.save_dir, rank=rank)
+                torch.save(model.state_dict(), os.path.join(args.save_dir, f"ddp_model_state_dict_{current_epoch}.pt"))
+                save_checkpoint_with_epoch(
+                    args.save_dir, epoch=current_epoch, optimizer=optimizer
+                )
             if np.max(test_elbos) < test_elbo:
                 test_evaluator.save(args.save_dir)
                 model.module.save(args.save_dir, rank=rank)
                 torch.save(model.state_dict(), os.path.join(args.save_dir, "ddp_model_state_dict.pt"))
                 save_checkpoint(
-                    args.save_dir, epoch=epoch, optimizer=optimizer
+                    args.save_dir, epoch=current_epoch, optimizer=optimizer
                 )
                 LOGGER.info("Saved model!")
             test_elbos.append(test_elbo)
@@ -560,8 +582,8 @@ def main(rank: int, world_size: int, exp_id: str):
                     )
 
             # Report
-            test_evaluator.report(epoch * len(datamodule.train_loader))
-            test_evaluator.log(epoch)
+            test_evaluator.report(current_epoch * len(datamodule.train_loader))
+            test_evaluator.log(current_epoch)
             test_evaluator.reset()
     ddp_cleanup()
 

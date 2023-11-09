@@ -13,8 +13,11 @@ import oodd.models
 LOGGER = logging.getLogger(name=__file__)
 
 MODEL_CLASS_NAME_STR = 'model_class_name.pt'
+MODEL_CLASS_NAME_STR_WITH_E = 'model_class_name_{}.pt'
 MODEL_INIT_KWRGS_STR = 'model_kwargs.pt'
+MODEL_INIT_KWRGS_STR_WITH_E = 'model_kwargs_{}.pt'
 MODEL_STATE_DICT_STR = 'model_state_dict.pt'
+MODEL_STATE_DICT_STR_WITH_E = 'model_state_dict_{}.pt'
 
 
 def load_model(path, model_class_name: str = None, device: str = 'cpu'):
@@ -82,6 +85,15 @@ class BaseModule(nn.Module):
             torch.save(self.__class__.__name__, os.path.join(path, MODEL_CLASS_NAME_STR))
             torch.save(self.init_arguments(), os.path.join(path, MODEL_INIT_KWRGS_STR))
             torch.save(self.state_dict(), os.path.join(path, MODEL_STATE_DICT_STR))
+
+    def save_with_epoch(self, path, rank, epoch):
+        """Save the module class name, init_arguments and state_dict to different files in the directory given by path"""
+        print(f"Running DDP checkpoint on rank {rank}")
+        if rank == 0:
+            os.makedirs(path, exist_ok=True)
+            torch.save(self.__class__.__name__, os.path.join(path, MODEL_CLASS_NAME_STR_WITH_E.format(epoch)))
+            torch.save(self.init_arguments(), os.path.join(path, MODEL_INIT_KWRGS_STR_WITH_E.format(epoch)))
+            torch.save(self.state_dict(), os.path.join(path, MODEL_STATE_DICT_STR_WITH_E.format(epoch)))
 
     @classmethod
     def load(
