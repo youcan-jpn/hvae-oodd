@@ -58,9 +58,9 @@ parser.add_argument("--seed", type=int, default=1, metavar="S", help="random see
 parser.add_argument("--test_every", type=int, default=1, help="epochs between evaluations")
 parser.add_argument("--save_dir", type=str, default="./models", help="directory for saving models")
 parser.add_argument("--use_wandb", type=str2bool, default=True, help="use wandb tracking")
-parser.add_argument("--name", type=str, default=True, help="wandb tracking name")
+parser.add_argument("--name", type=str, default="hvae-oodd", help="wandb tracking name")
 parser.add_argument("--checkpoint_path", type=str, default="", help="path to checkpoint")
-parser.add_argument("--exp_id", type=str, default="", help="unique id for the experiment")
+parser.add_argument("--exp_id", type=str, default="CIFAR10Dequantized-Simpler", help="unique id for the experiment")
 
 parser = oodd.datasets.DataModule.get_argparser(parents=[parser])
 
@@ -70,6 +70,7 @@ args.start_time = str(datetime.datetime.now()).replace(" ", "-").replace(":", "-
 args.train_sample_reduction = log_sum_exp if args.train_importance_weighted else torch.mean
 args.test_sample_reduction = log_sum_exp if args.test_importance_weighted else torch.mean
 args.use_wandb = wandb_available and args.use_wandb
+
 
 set_seed(args.seed)
 
@@ -419,6 +420,10 @@ def subsample_labels_and_scores(y_true, y_score, n_examples):
 
 
 def main(rank: int, world_size: int, exp_id: str):
+    if args.use_wandb and rank == 0:
+        wandb.init(args.name)
+    elif args.use_wandb:
+        args.use_wandb = False  # turn off if the rank != 0
     print(f"Running DDP on rank {rank}")
     ddp_setup(rank, world_size)
     if args.exp_id == "":
@@ -435,14 +440,14 @@ def main(rank: int, world_size: int, exp_id: str):
 
     deterministic_warmup = oodd.variational.DeterministicWarmup(
         n=args.warmup_epochs,
-        start_epoch=current_epoch,
+        start_epoch=start_epoch,
     )
     free_nats_cooldown = oodd.variational.FreeNatsCooldown(
         constant_epochs=args.free_nats_epochs // 2,
         cooldown_epochs=args.free_nats_epochs // 2,
         start_val=args.free_nats,
         end_val=0,
-        start_epoch=current_epoch,
+        start_epoch=start_epoch,
     )
 
     criterion = oodd.losses.ELBO()
