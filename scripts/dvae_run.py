@@ -517,7 +517,7 @@ def main(rank: int, world_size: int, exp_id: str):
             # Save
             test_elbo = test_evaluator.get_primary_metric().mean().cpu().numpy()
             if current_epoch % 50 == 0:
-                model.module.save(args.save_dir, rank=rank)
+                model.module.save_with_epoch(args.save_dir, rank=rank, epoch=current_epoch)
                 torch.save(model.state_dict(), os.path.join(args.save_dir, f"ddp_model_state_dict_{current_epoch}.pt"))
                 save_checkpoint_with_epoch(
                     args.save_dir, epoch=current_epoch, optimizer=optimizer
