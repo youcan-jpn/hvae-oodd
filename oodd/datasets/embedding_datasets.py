@@ -3,19 +3,30 @@
 import argparse
 import logging
 import os
+from typing import Tuple, Any
 
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset
+import torchvision
 
 import oodd.constants
 
 from oodd.constants import TRAIN_SPLIT, VAL_SPLIT, TEST_SPLIT, DATA_DIRECTORY
+from oodd.datasets import transforms
 
 from .dataset_base import BaseDataset
 
 
 LOGGER = logging.getLogger(name=__file__)
+
+
+TRANSFORM_NORMALIZE = torchvision.transforms.Compose(
+    [
+        torchvision.transforms.ToTensor(),
+        transforms.Scale(a=0, b=1),  # Scale to [0, 1]
+    ]
+)
 
 
 class EmbeddingDataset(BaseDataset):
@@ -52,15 +63,16 @@ class EmbeddingDataset(BaseDataset):
         embedding_filepath = os.path.join(self.root, embedding_filename)
         label_filepath = os.path.join(self.root, label_filename)
 
-        inps = torch.from_numpy(np.load(embedding_filepath, allow_pickle=True))  # TODO: shape
+        inps = np.load(embedding_filepath, allow_pickle=True)
+
+        _shape = inps.shape
+        if isinstance(_shape, tuple) and len(_shape) == 2:
+            _, ed = _shape
+            if ed == 512:
+                inps = np.concatenate([inps, inps], axis=1).reshape(-1, 32, 32)
+                inps = np.stack([inps, inps, inps], axis=3)  # (d, 32, 32, 3)
+        inps = torch.from_numpy(inps)
         tgts = torch.from_numpy(np.load(label_filepath, allow_pickle=True))
-
-        if transform is not None:
-            inps = transform(inps)
-
-        if target_transform is not None:
-            tgts = target_transform(tgts)
-
         self.dataset = TensorDataset(inps, tgts)
 
     @classmethod
@@ -69,11 +81,27 @@ class EmbeddingDataset(BaseDataset):
         parser.add_argument("--root", type=str, default=DATA_DIRECTORY, help="Data storage location")
         return parser
 
-    def item_getter(self, idx):
-        return self.dataset[idx]
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        """
+        Args:
+            index (int): Index
 
-    def __getitem__(self, idx):
-        return self.item_getter(idx)
+        Returns:
+            tuple: (image, target) where target is index of the target class.
+        """
+        img, target = self.dataset[index]
+
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+        img = img.numpy()
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target
 
     def __len__(self):
         return len(self.dataset)
@@ -87,3 +115,4 @@ class CIFAR10EmbeddingSimCLR(EmbeddingDataset):
     _test_label_filename = "test_latents_targets.npy"
     root_subdir = "CIFAR10"
     root_embdir = "simclr"
+    default_transform = TRANSFORM_NORMALIZE

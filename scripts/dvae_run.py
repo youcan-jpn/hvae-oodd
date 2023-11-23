@@ -60,7 +60,7 @@ parser.add_argument("--save_dir", type=str, default="./models", help="directory 
 parser.add_argument("--use_wandb", type=str2bool, default=True, help="use wandb tracking")
 parser.add_argument("--name", type=str, default="hvae-oodd", help="wandb tracking name")
 parser.add_argument("--checkpoint_path", type=str, default="", help="path to checkpoint")
-parser.add_argument("--exp_id", type=str, default="CIFAR10Dequantized-Simpler", help="unique id for the experiment")
+parser.add_argument("--exp_id", type=str, default="", help="unique id for the experiment")
 
 parser = oodd.datasets.DataModule.get_argparser(parents=[parser])
 
